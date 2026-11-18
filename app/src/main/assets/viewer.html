@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quick PPTX Viewer</title>
+<script src="jszip.min.js"></script>
+<style>
+:root{--bg:#f4f4f2;--fg:#1a1a1a;--mut:#666;--card:#fff;--ac:#d71921;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111;--fg:#eee;--mut:#999;--card:#222}}
+:root[data-theme="dark"]{--bg:#111;--fg:#eee;--mut:#999;--card:#222}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px system-ui,-apple-system,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+#home{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center}
+#home h1{margin:0;font-size:26px}#home p{margin:0;color:var(--mut);max-width:320px;line-height:1.4}
+.btn{background:var(--ac);color:#fff;border:0;border-radius:28px;padding:16px 34px;font-size:18px;font-weight:600}
+.btn.s{background:var(--card);color:var(--fg);padding:10px 18px;font-size:15px;border:1px solid #8884;border-radius:20px}
+#viewer{flex:1;display:none;flex-direction:column;min-height:0}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;touch-action:pan-y}
+.sl{position:relative;overflow:hidden;background:#fff;box-shadow:0 2px 14px #0005;flex:none}
+.sl .a{position:absolute;box-sizing:border-box;overflow:hidden;display:flex;flex-direction:column}
+.sl img{width:100%;height:100%;object-fit:fill;display:block}
+.sl p{margin:0 0 .25em;line-height:1.2;white-space:pre-wrap;overflow-wrap:anywhere}
+.sl table{border-collapse:collapse;width:100%}.sl td{border:1px solid #8886;padding:2px 4px;vertical-align:top}
+#bar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px}
+#cnt{color:var(--mut);font-variant-numeric:tabular-nums}
+#msg{color:var(--mut);min-height:1.2em}
+</style></head>
+<body>
+<div id="home">
+  <h1>Quick PPTX Viewer</h1>
+  <p>Pick a .pptx file. It opens right on your phone and nothing is uploaded anywhere.</p>
+  <button class="btn" id="pick">Open a PowerPoint</button>
+  <div id="msg"></div>
+  <input id="file" type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden>
+</div>
+<div id="viewer">
+  <div id="stage"></div>
+  <div id="bar"><button class="btn s" id="back">Close</button><button class="btn s" id="prev">‹</button><span id="cnt"></span><button class="btn s" id="next">›</button></div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const NS_R='http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+let zip,slides=[],size={w:9144000,h:5143500},theme={},cache=[],cur=0;
+const kids=(e,n)=>e?[...e.children].filter(c=>c.localName===n):[];
+const tags=(e,n)=>e?[...e.getElementsByTagNameNS('*',n)]:[];
+const parse=async p=>{const f=zip.file(p);return f?new DOMParser().parseFromString(await f.async('string'),'application/xml'):null};
+const resolve=(base,t)=>t.startsWith('/')?t.slice(1):new URL(t,'http://x/'+base).pathname.slice(1);
+async function rels(path){
+  const i=path.lastIndexOf('/'),d=await parse(path.slice(0,i)+'/_rels/'+path.slice(i+1)+'.rels'),o={};
+  tags(d,'Relationship').forEach(r=>o[r.getAttribute('Id')]=resolve(path,r.getAttribute('Target')));
+  return o;
+}
+function color(sf){
+  const c=sf&&sf.firstElementChild;if(!c)return null;const v=c.getAttribute('val');
+  if(c.localName==='srgbClr')return'#'+v;
+  if(c.localName==='sysClr')return'#'+c.getAttribute('lastClr');
+  if(c.localName==='schemeClr'){const m={tx1:'dk1',bg1:'lt1',tx2:'dk2',bg2:'lt2'}[v]||v;return theme[m]||null}
+  return null;
+}
+const lum=h=>{if(!h)return 1;const n=parseInt(h.slice(1),16);return(((n>>16)&255)*.3+((n>>8)&255)*.59+(n&255)*.11)/255};
+function findPh(d,ph){
+  if(!d)return null;const t=ph.getAttribute('type'),ix=ph.getAttribute('idx');
+  for(const s of tags(d,'sp')){
+    const p=tags(s,'ph')[0];if(!p)continue;const st=p.getAttribute('type'),si=p.getAttribute('idx');
+    if((ix&&si===ix)||(t&&t===st)||(t==='ctrTitle'&&st==='title')){
+      const xf=kids(kids(s,'spPr')[0],'xfrm')[0];if(xf)return xf;
+    }
+  }
+  return null;
+}
+function rectOf(c,docs){
+  const own=kids(c,'spPr')[0]||c;let xf=kids(own,'xfrm')[0];
+  if(!xf){const ph=tags(c,'ph')[0];if(ph)for(const d of docs){xf=findPh(d,ph);if(xf)break}}
+  if(!xf)return null;
+  const o=kids(xf,'off')[0],e=kids(xf,'ext')[0];if(!o||!e)return null;
+  return{x:+o.getAttribute('x'),y:+o.getAttribute('y'),w:+e.getAttribute('cx'),h:+e.getAttribute('cy')};
+}
+function place(div,r){
+  div.className='a';
+  div.style.left=r.x/size.w*100+'%';div.style.top=r.y/size.h*100+'%';
+  div.style.width=r.w/size.w*100+'%';div.style.height=r.h/size.h*100+'%';
+}
+function fillText(div,c,txt,defColor){
+  const body=tags(c,'bodyPr')[0],anchor=body&&body.getAttribute('anchor');
+  div.style.justifyContent=anchor==='ctr'?'center':anchor==='b'?'flex-end':'flex-start';
+  const fs=body&&tags(body,'normAutofit')[0],scale=fs&&fs.getAttribute('fontScale')?fs.getAttribute('fontScale')/100000:1;
+  const ph=tags(c,'ph')[0],pt=ph&&/title/i.test(ph.getAttribute('type')||'')?32:18;
+  div.style.padding='calc(var(--s)*4px)';
+  for(const p of kids(txt,'p')){
+    const el=document.createElement('p'),pPr=kids(p,'pPr')[0];
+    const al=pPr&&pPr.getAttribute('algn');
+    el.style.textAlign={ctr:'center',r:'right',just:'justify'}[al]||'left';
+    if(pPr&&kids(pPr,'buChar')[0]){el.style.paddingLeft='1em';el.style.textIndent='-1em';el.append('• ')}
+    let any=false;
+    for(const r of p.children){
+      if(r.localName==='br'){el.append(document.createElement('br'));continue}
+      if(r.localName!=='r'&&r.localName!=='fld')continue;
+      const t=tags(r,'t')[0];if(!t)continue;any=true;
+      const sp=document.createElement('span'),rp=kids(r,'rPr')[0];
+      const sz=rp&&rp.getAttribute('sz')?rp.getAttribute('sz')/100:pt;
+      sp.style.fontSize=`calc(var(--s)*${(sz*scale).toFixed(1)}px)`;
+      if(rp&&rp.getAttribute('b')==='1')sp.style.fontWeight='700';
+      if(rp&&rp.getAttribute('i')==='1')sp.style.fontStyle='italic';
+      if(rp&&rp.getAttribute('u')&&rp.getAttribute('u')!=='none')sp.style.textDecoration='underline';
+      sp.style.color=color(kids(rp,'solidFill')[0])||defColor;
+      sp.textContent=t.textContent;el.append(sp);
+    }
+    if(!any)el.style.minHeight='1em';
+    div.append(el);
+  }
+}
+async function render(i){
+  if(cache[i])return cache[i];
+  const path=slides[i],doc=await parse(path),r=await rels(path);
+  const lay=Object.values(r).find(t=>t.includes('slideLayouts/'));
+  const lDoc=lay&&await parse(lay);let mDoc=null;
+  if(lay){const lr=await rels(lay),m=Object.values(lr).find(t=>t.includes('slideMasters/'));mDoc=m&&await parse(m)}
+  const docs=[lDoc,mDoc],el=document.createElement('div');el.className='sl';
+  let bg=null;
+  for(const d of [doc,lDoc,mDoc]){const b=tags(d,'bg')[0];if(b){bg=color(tags(b,'solidFill')[0]);if(bg)break}}
+  el.style.background=bg||'#fff';
+  const defColor=lum(bg||'#ffffff')<.45?'#fff':'#000';
+  async function handle(c){
+    const n=c.localName;
+    if(n==='grpSp'){for(const k of c.children)await handle(k);return}
+    if(n!=='sp'&&n!=='pic'&&n!=='graphicFrame')return;
+    const rc=rectOf(c,docs);if(!rc)return;
+    const div=document.createElement('div');place(div,rc);
+    const spPr=kids(c,'spPr')[0];
+    const f=color(kids(spPr,'solidFill')[0]);if(f)div.style.background=f;
+    const ln=kids(spPr,'ln')[0],lc=ln&&color(kids(ln,'solidFill')[0]);if(lc)div.style.border='1px solid '+lc;
+    if(n==='pic'){
+      const bl=tags(c,'blip')[0],id=bl&&bl.getAttributeNS(NS_R,'embed'),f2=id&&r[id]&&zip.file(r[id]);
+      if(f2){const im=document.createElement('img');im.src=URL.createObjectURL(await f2.async('blob'));div.append(im)}
+    }else if(n==='graphicFrame'){
+      const tb=tags(c,'tbl')[0];if(!tb)return;
+      const t=document.createElement('table');t.style.fontSize='calc(var(--s)*12px)';t.style.color=defColor;
+      for(const tr of kids(tb,'tr')){const row=t.insertRow();for(const tc of kids(tr,'tc'))row.insertCell().textContent=tags(tc,'t').map(x=>x.textContent).join(' ')}
+      div.append(t);
+    }else{
+      const txt=kids(c,'txBody')[0];if(txt)fillText(div,c,txt,defColor);
+    }
+    el.append(div);
+  }
+  const tree=tags(doc,'spTree')[0];
+  for(const c of tree.children)await handle(c);
+  return cache[i]=el;
+}
+function fit(){
+  const st=$('#stage'),cw=st.clientWidth-16,ch=st.clientHeight-8,ra=size.w/size.h,w=Math.max(50,Math.min(cw,ch*ra));
+  st.style.setProperty('--s',(w/(size.w/12700)).toFixed(4)+'px');
+  st.style.setProperty('--sw',w+'px');st.style.setProperty('--sh',w/ra+'px');
+  const e=st.firstElementChild;if(e){e.style.width=w+'px';e.style.height=w/ra+'px'}
+}
+async function show(i){
+  if(i<0||i>=slides.length)return;cur=i;
+  const el=await render(i);if(cur!==i)return;
+  $('#stage').replaceChildren(el);fit();
+  $('#cnt').textContent=(i+1)+' / '+slides.length;
+  if(i+1<slides.length)render(i+1).catch(()=>{});
+}
+async function openFile(file){
+  const msg=$('#msg');msg.textContent='Opening…';
+  try{
+    zip=await JSZip.loadAsync(file);cache=[];
+    const pres=await parse('ppt/presentation.xml');if(!pres)throw 0;
+    const sz=tags(pres,'sldSz')[0];if(sz)size={w:+sz.getAttribute('cx'),h:+sz.getAttribute('cy')};
+    const th=await parse('ppt/theme/theme1.xml'),cs=tags(th,'clrScheme')[0];theme={};
+    if(cs)for(const c of cs.children){const k=c.firstElementChild;if(k)theme[c.localName]='#'+(k.getAttribute('val')||k.getAttribute('lastClr'))}
+    const pr=await rels('ppt/presentation.xml');
+    slides=tags(pres,'sldId').map(e=>pr[e.getAttributeNS(NS_R,'id')]).filter(Boolean);
+    if(!slides.length)throw 0;
+    $('#home').style.display='none';$('#viewer').style.display='flex';msg.textContent='';
+    await show(0);
+  }catch(e){msg.textContent='Could not read that file. Only .pptx works (not old .ppt).'}
+}
+async function loadShared(){try{const r=await fetch('/shared/current.pptx');await openFile(await r.blob())}catch(e){$('#msg').textContent='Could not open the shared file.'}}
+$('#pick').onclick=()=>$('#file').click();
+$('#file').onchange=e=>{const f=e.target.files[0];if(f)openFile(f);e.target.value=''};
+$('#next').onclick=()=>show(cur+1);$('#prev').onclick=()=>show(cur-1);
+$('#back').onclick=()=>{$('#viewer').style.display='none';$('#home').style.display='flex'};
+let tx=0;const st=$('#stage');
+st.addEventListener('touchstart',e=>tx=e.touches[0].clientX,{passive:true});
+st.addEventListener('touchend',e=>{const d=e.changedTouches[0].clientX-tx;if(Math.abs(d)>50)show(cur+(d<0?1:-1))});
+addEventListener('keydown',e=>{if(e.key==='ArrowRight')show(cur+1);if(e.key==='ArrowLeft')show(cur-1)});
+addEventListener('resize',fit);
+</script></body></html>
